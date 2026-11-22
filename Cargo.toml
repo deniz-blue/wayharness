@@ -1,0 +1,17 @@
+[package]
+name = "wayharness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pixman = "0.2.1"
+png = "0.17"
+
+[dependencies.smithay]
+version = "0.7.0"
+default-features = false
+features = ["wayland_frontend", "desktop", "renderer_pixman"]
+
+[dev-dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
