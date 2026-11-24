@@ -2,10 +2,23 @@
 name = "wayharness"
 version = "0.1.0"
 edition = "2024"
+description = "Headless Wayland compositor for tests and agents: list windows, screenshot, resize, input, accessibility tree"
+license = "MIT"
+repository = "https://github.com/deniz-blue/wayharness"
+readme = "README.md"
+keywords = ["wayland", "compositor", "headless", "testing", "accessibility"]
+categories = ["development-tools::testing", "command-line-utilities"]
 
 [dependencies]
+libc = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
 pixman = "0.2.1"
 png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+atspi = { version = "0.30", default-features = false, features = ["proxies"] }
+zbus = "5"
 
 [dependencies.smithay]
 version = "0.7.0"

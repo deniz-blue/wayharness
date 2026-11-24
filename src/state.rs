@@ -1,8 +1,10 @@
 use std::time::Instant;
 
+use crate::input::Input;
+
 use smithay::{
     backend::renderer::pixman::PixmanRenderer,
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::Window,
     input::{SeatHandler, SeatState},
@@ -27,6 +29,10 @@ use smithay::{
             XdgToplevelSurfaceData,
             decoration::{XdgDecorationHandler, XdgDecorationState},
         },
+        selection::{
+            SelectionHandler,
+            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
+        },
         shm::{ShmHandler, ShmState},
     },
 };
@@ -42,8 +48,9 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
+    pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<State>,
-    pub output: Output,
+    pub input: Input,
     pub toplevels: Vec<Toplevel>,
     pub next_id: u32,
     pub renderer: PixmanRenderer,
@@ -60,46 +67,50 @@ impl ClientData for ClientState {
 }
 
 impl State {
-    pub fn new(display: &DisplayHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let output = Output::new(
-            "wayharness-0".into(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "wayharness".into(),
-                model: "virtual".into(),
-            },
-        );
-        output.create_global::<State>(display);
+    pub fn new(display: &DisplayHandle, size: (i32, i32)) -> Result<Self, Box<dyn std::error::Error>> {
+        create_output(display, size);
         OutputManagerState::new_with_xdg_output::<State>(display);
         XdgDecorationState::new::<State>(display);
         let mut seat_state = SeatState::new();
-        seat_state.new_wl_seat(display, "wayharness-seat");
-        let state = Self {
+        let mut seat = seat_state.new_wl_seat(display, "wayharness-seat");
+        Ok(Self {
             display_handle: display.clone(),
             start: Instant::now(),
             compositor_state: CompositorState::new::<State>(display),
             xdg_shell_state: XdgShellState::new::<State>(display),
             shm_state: ShmState::new::<State>(display, vec![]),
+            data_device_state: DataDeviceState::new::<State>(display),
             seat_state,
-            output,
+            input: Input::new(&mut seat)?,
             toplevels: Vec::new(),
             next_id: 1,
             renderer: PixmanRenderer::new()?,
-        };
-        state.set_output_size(1280, 720);
-        Ok(state)
+        })
     }
 
-    pub fn set_output_size(&self, width: i32, height: i32) {
-        let mode = Mode { size: (width, height).into(), refresh: 60_000 };
-        self.output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
-        self.output.set_preferred(mode);
+    pub fn now_ms(&self) -> u32 {
+        self.start.elapsed().as_millis() as u32
     }
 
     pub fn find(&self, id: u32) -> Option<&Toplevel> {
         self.toplevels.iter().find(|toplevel| toplevel.id == id)
     }
+}
+
+fn create_output(display: &DisplayHandle, (width, height): (i32, i32)) {
+    let output = Output::new(
+        "wayharness-0".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "wayharness".into(),
+            model: "virtual".into(),
+        },
+    );
+    let mode = Mode { size: (width, height).into(), refresh: 60_000 };
+    output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    output.set_preferred(mode);
+    output.create_global::<State>(display);
 }
 
 pub fn toplevel_strings(toplevel: &ToplevelSurface) -> (String, String) {
@@ -154,6 +165,20 @@ impl ShmHandler for State {
 
 impl OutputHandler for State {}
 
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl ClientDndGrabHandler for State {}
+
+impl ServerDndGrabHandler for State {}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -206,6 +231,7 @@ impl XdgShellHandler for State {
 delegate_compositor!(State);
 delegate_seat!(State);
 delegate_shm!(State);
+delegate_data_device!(State);
 delegate_output!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);

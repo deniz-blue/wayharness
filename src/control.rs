@@ -1,96 +1,92 @@
 use std::{
     fs::File,
-    io::{BufRead, BufWriter, Write},
-    path::PathBuf,
+    io::{BufRead, BufReader, BufWriter, Write},
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
-use smithay::utils::Size;
+use serde_json::{Value, json};
+use smithay::{reexports::wayland_server::Resource, utils::Size};
 
-use crate::{render, state::{State, toplevel_strings}};
+use crate::{
+    input, render,
+    protocol::{Reply, Request, Window},
+    state::{State, Toplevel, toplevel_strings},
+};
 
-pub fn name() -> String {
-    std::env::var("WAYHARNESS").unwrap_or_else(|_| "wayharness".into())
+pub fn runtime_dir() -> PathBuf {
+    std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()).into()
 }
 
-pub fn socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(runtime_dir).join(format!("{}.ctl", name()))
+pub fn socket_path(display: &str) -> PathBuf {
+    runtime_dir().join(format!("{display}.ctl"))
 }
 
-pub fn read_request(stream: &std::os::unix::net::UnixStream) -> std::io::Result<String> {
+pub fn serve_connection(state: &mut State, mut stream: UnixStream) {
+    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
     let mut line = String::new();
-    std::io::BufReader::new(stream).read_line(&mut line)?;
-    Ok(line.trim_end().to_string())
-}
-
-pub fn run(state: &mut State, request: &str) -> Result<String, String> {
-    let mut words = request.splitn(3, ' ');
-    let command = words.next().unwrap_or_default();
-    let numbers = |rest: &str| -> Result<Vec<u32>, String> {
-        rest.split(' ').map(|n| n.parse::<u32>().map_err(|e| format!("{n}: {e}"))).collect()
+    if BufReader::new(&stream).read_line(&mut line).is_err() {
+        return;
+    }
+    let reply = match serde_json::from_str(&line) {
+        Ok(request) => handle(state, request).map_or_else(Reply::Error, Reply::Ok),
+        Err(error) => Reply::Error(error.to_string()),
     };
-    match command {
-        "list" => Ok(list(state)),
-        "resize-output" => match numbers(&request["resize-output ".len().min(request.len())..])?[..] {
-            [w, h] => {
-                state.set_output_size(w as i32, h as i32);
-                Ok(String::new())
-            }
-            _ => Err("usage: resize-output W H".into()),
-        },
-        "resize-window" => match numbers(&request["resize-window ".len().min(request.len())..])?[..] {
-            [id, w, h] => resize_window(state, id, w as i32, h as i32),
-            _ => Err("usage: resize-window ID W H".into()),
-        },
-        "screenshot" => {
-            let target = words.next().ok_or("usage: screenshot output|ID PATH")?;
-            let path = words.next().ok_or("usage: screenshot output|ID PATH")?;
-            let window = match target {
-                "output" => None,
-                id => Some(id.parse::<u32>().map_err(|e| format!("{id}: {e}"))?),
-            };
-            screenshot(state, window, path)
-        }
-        _ => Err(format!("unknown command: {command}")),
+    if let Ok(text) = serde_json::to_string(&reply) {
+        writeln!(stream, "{text}").ok();
     }
 }
 
-fn list(state: &State) -> String {
+fn handle(state: &mut State, request: Request) -> Result<Value, String> {
+    let done = match request {
+        Request::List => return Ok(json!(windows(state))),
+        Request::ResizeWindow { id, width, height } => resize_window(state, id, width, height),
+        Request::Screenshot { id, path } => screenshot(state, id, &path),
+        Request::MovePointer { id, x, y } => input::move_pointer(state, id, x, y),
+        Request::Click { id, x, y, button } => input::click(state, id, x, y, button),
+        Request::Scroll { id, x, y, dx, dy } => input::scroll(state, id, x, y, dx, dy),
+        Request::Key { id, keys } => input::press_keys(state, id, &keys),
+        Request::Type { id, text } => input::type_text(state, id, &text),
+    };
+    done.map(|()| Value::Null)
+}
+
+fn windows(state: &State) -> Vec<Window> {
     state
         .toplevels
         .iter()
         .map(|toplevel| {
             let (app_id, title) = toplevel_strings(toplevel.window.toplevel().unwrap());
             let size = toplevel.window.geometry().size;
-            format!("{}\t{}\t{}\t{}x{}\n", toplevel.id, app_id, title, size.w, size.h)
+            Window { id: toplevel.id, pid: process_id(state, toplevel), app_id, title, width: size.w, height: size.h }
         })
         .collect()
 }
 
-fn resize_window(state: &State, id: u32, width: i32, height: i32) -> Result<String, String> {
+fn process_id(state: &State, toplevel: &Toplevel) -> u32 {
+    let surface = toplevel.window.toplevel().unwrap().wl_surface();
+    surface
+        .client()
+        .and_then(|client| client.get_credentials(&state.display_handle).ok())
+        .map_or(0, |credentials| credentials.pid as u32)
+}
+
+fn resize_window(state: &State, id: u32, width: i32, height: i32) -> Result<(), String> {
     let toplevel = state.find(id).ok_or(format!("no window {id}"))?;
     let surface = toplevel.window.toplevel().unwrap();
     surface.with_pending_state(|pending| pending.size = Some(Size::from((width, height))));
     surface.send_pending_configure();
-    Ok(String::new())
+    Ok(())
 }
 
-fn screenshot(state: &mut State, window: Option<u32>, path: &str) -> Result<String, String> {
-    let image = render::render(state, window)?;
-    let file = File::create(path).map_err(|e| format!("{path}: {e}"))?;
+fn screenshot(state: &mut State, id: u32, path: &Path) -> Result<(), String> {
+    let image = render::render(state, id)?;
+    let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(&image.rgba).map_err(|e| e.to_string())?;
-    writer.finish().map_err(|e| e.to_string())?;
-    Ok(String::new())
-}
-
-pub fn reply(stream: &mut std::os::unix::net::UnixStream, result: Result<String, String>) {
-    let text = match result {
-        Ok(text) => text,
-        Err(message) => format!("error: {message}\n"),
-    };
-    stream.write_all(text.as_bytes()).ok();
+    writer.finish().map_err(|e| e.to_string())
 }
