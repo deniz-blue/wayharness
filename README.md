@@ -60,4 +60,3 @@ A headless Wayland compositor for tests and agents. Run a GUI app in it, then li
 ## Tests
 
 - `cargo test`
-- Tests that need `godot` or `qml6` skip themselves when it is not installed

@@ -14,25 +14,6 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 pub struct Compositor {
     child: Child,
     pub name: String,
-    pub session_bus: String,
-}
-
-pub struct Client(Child);
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
-}
-
-pub fn installed(program: &str) -> bool {
-    let found = std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()));
-    if !found {
-        eprintln!("skipped: {program} is not installed");
-    }
-    found
 }
 
 pub struct Screenshot {
@@ -70,8 +51,7 @@ impl Compositor {
         let name = endpoints["display"].as_str().unwrap().to_string();
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap();
         assert_eq!(endpoints["control"], format!("{runtime_dir}/{name}.ctl"));
-        let session_bus = endpoints["session_bus"].as_str().unwrap().to_string();
-        Self { child, name, session_bus }
+        Self { child, name }
     }
 
     pub fn try_ctl(&self, args: &[&str]) -> std::process::Output {
@@ -82,15 +62,6 @@ impl Compositor {
         let output = self.try_ctl(args);
         assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap()
-    }
-
-    pub fn start_client(&self, mut command: Command) -> Client {
-        command
-            .env("WAYLAND_DISPLAY", &self.name)
-            .env("DBUS_SESSION_BUS_ADDRESS", &self.session_bus)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        Client(command.spawn().unwrap())
     }
 
     pub fn screenshot(&self, id: u32) -> Screenshot {
